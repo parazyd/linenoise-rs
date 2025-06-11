@@ -1253,6 +1253,9 @@ pub struct LinenoiseState {
 }
 
 impl LinenoiseState {
+    /// This function is part of the multiplexed API in linenoise, that is used in order
+    /// to implement the blocking variant of the API but can also be called by the user
+    /// directly in an event-driven program.
     pub fn edit_start(stdin_fd: RawFd, stdout_fd: RawFd, prompt: &str) -> io::Result<Self> {
         let ifd = if stdin_fd == -1 {
             libc::STDIN_FILENO
@@ -1286,6 +1289,9 @@ impl LinenoiseState {
         })
     }
 
+    /// Part of the multiplexed API. Call this function each time there is some data
+    /// to read from the standard input file descriptor. In case of blocking operations
+    /// this function can just be called in a loop, and block.
     pub fn edit_feed(&mut self) -> io::Result<Option<String>> {
         if !self.active {
             return Ok(None);
@@ -1366,6 +1372,8 @@ impl LinenoiseState {
         }
     }
 
+    /// Part of the multiplexed API. At this point the user input is in the buffer,
+    /// and we can restore the terminal in normal node.
     pub fn edit_stop(&mut self) -> io::Result<()> {
         if self.active {
             self.active = false;
@@ -1375,11 +1383,13 @@ impl LinenoiseState {
         Ok(())
     }
 
+    /// Hide the current line, when using the multiplexed API.
     pub fn hide(&self) -> io::Result<()> {
         // Save cursor position and clear line
         self.editor.terminal.write("\x1b[s\r\x1b[0K")
     }
 
+    /// Show the current line, when using the multiplexed API.
     pub fn show(&mut self) -> io::Result<()> {
         // Restore cursor position and refresh
         self.editor.terminal.write("\x1b[u")?;

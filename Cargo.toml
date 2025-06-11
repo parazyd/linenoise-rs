@@ -1,6 +1,10 @@
 [package]
-name = "linenoisers"
+name = "linenoise-rs"
 version = "0.0.1"
+homepage = "https://github.com/parazyd/linenoise-rs/"
+description = "Guerilla like editing library"
+authors = ["parazyd <parazyd@dyne.org>"]
+repository = "https://github.com/parazyd/linenoise-rs"
 license = "BSD-2-Clause"
 edition = "2024"
 

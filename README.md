@@ -1,5 +1,5 @@
-linenoisers
-===========
+linenoise-rs
+============
 
 Rust port of [linenoise](https://github.com/antirez/linenoise).
 Should also have proper UTF-8 support.

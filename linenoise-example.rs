@@ -22,7 +22,7 @@
 use std::{env, process};
 
 use libc::{fd_set, select, timeval, FD_SET, FD_ZERO};
-use linenoisers::*;
+use linenoise_rs::*;
 
 fn completion(buf: &str, lc: &mut Vec<String>) {
     if buf.starts_with("h") {
