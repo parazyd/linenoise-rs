@@ -37,6 +37,7 @@
 //! - http://invisible-island.net/xterm/ctlseqs/ctlseqs.html
 //! - http://www.3waylabs.com/nw/WWW/products/wizcon/vt220.html
 
+#![allow(clippy::manual_div_ceil)]
 #![allow(clippy::manual_range_contains)]
 
 use std::cmp::min;
@@ -515,7 +516,8 @@ struct Editor {
     history_index: usize,
     saved_line: Option<String>,
     completion_state: Option<CompletionState>,
-    old_rows: usize, // For multiline mode
+    old_rows: usize,          // For multiline mode
+    cursor_row_offset: usize, // For multiline mode
 }
 
 struct CompletionState {
@@ -533,6 +535,7 @@ impl Editor {
             saved_line: None,
             completion_state: None,
             old_rows: 0,
+            cursor_row_offset: 0,
         }
     }
 
@@ -626,71 +629,97 @@ impl Editor {
         let plen = self.prompt.chars().count();
         let cols = self.terminal.cols;
 
-        // Calculate how many rows we need
-        let prompt_and_text_len = plen + self.buffer.chars.len();
-        let rows = prompt_and_text_len.div_ceil(cols);
+        // Calculate dimensions
+        let content_len = plen + self.buffer.chars.len();
+        let cursor_pos = plen + self.buffer.pos;
 
-        // Calculate old cursor position in rows
-        let old_rpos = if self.old_rows > 0 {
-            (plen + self.buffer.pos).div_ceil(cols)
+        // Calculate how many rows we need
+        let content_rows = if content_len == 0 {
+            1
         } else {
-            0
+            (content_len + cols - 1) / cols
         };
 
-        // If this is first refresh, just set old_rows
-        if self.old_rows == 0 {
-            self.old_rows = rows;
-        }
+        // Do we need an extra row for cursor at end of line?
+        let phantom_line =
+            self.buffer.pos == self.buffer.chars.len() && cursor_pos > 0 && cursor_pos % cols == 0;
 
-        // Go to last row of previous render
-        if self.old_rows > old_rpos {
-            output.push_str(&format!("\x1b[{}B", self.old_rows - old_rpos));
-        }
-
-        // Clear all old rows from bottom up
-        for j in 0..self.old_rows - 1 {
-            // Clear line
-            output.push_str("\r\x1b[0K");
-            if j < self.old_rows - 1 {
-                // Move up
-                output.push_str("\x1b[1A");
-            }
-        }
-
-        // Clear the top line
-        output.push_str("\r\x1b[0K");
-
-        // Write prompt
-        output.push_str(&self.prompt);
-
-        // Write buffer content
-        if state.mask_mode {
-            for _ in 0..self.buffer.chars.len() {
-                output.push('*');
-            }
+        let total_rows = if phantom_line {
+            content_rows + 1
         } else {
-            let content: String = self.buffer.chars.iter().collect();
-            output.push_str(&content);
+            content_rows
+        };
+
+        // Calculate where cursor should be
+        let cursor_row = if cursor_pos == 0 {
+            0
+        } else if phantom_line {
+            content_rows // 0-indexed, so this is the phantom line
+        } else {
+            (cursor_pos - 1) / cols
+        };
+
+        let cursor_col = if phantom_line {
+            0
+        } else if cursor_pos == 0 {
+            plen
+        } else {
+            (cursor_pos - 1) % cols + 1
+        };
+
+        // Move cursor to start of edit area
+        // First go to beginning of current line
+        output.push('\r');
+
+        // Then move up by our tracked offset
+        if self.cursor_row_offset > 0 {
+            output.push_str(&format!("\x1b[{}A", self.cursor_row_offset));
         }
 
-        // Handle hints on the first line if there's space
-        if rows == 1 && self.completion_state.is_none() {
-            if let Some(ref callback) = state.hints_callback {
-                let line = self.buffer.as_string();
-                if let Some((hint, color, bold)) = callback(&line) {
-                    let current_line_len = (plen + self.buffer.chars.len()) % cols;
-                    let remaining = cols.saturating_sub(current_line_len);
+        // Now clear everything
+        let rows_to_clear = self.old_rows.max(total_rows);
+        for i in 0..rows_to_clear {
+            if i > 0 {
+                output.push_str("\r\n"); // New line
+            }
+            output.push_str("\x1b[2K"); // Clear entire line
+        }
 
-                    if remaining > 0 && current_line_len > 0 {
-                        let hint_chars: Vec<char> = hint.chars().take(remaining).collect();
-                        if !hint_chars.is_empty() {
+        // Go back to start
+        if rows_to_clear > 1 {
+            output.push_str(&format!("\x1b[{}A", rows_to_clear - 1));
+        }
+        output.push('\r');
+
+        // Write content
+        output.push_str(&self.prompt);
+        if state.mask_mode {
+            output.push_str(&"*".repeat(self.buffer.chars.len()));
+        } else {
+            output.push_str(&self.buffer.as_string());
+        }
+
+        // Add hints if appropriate
+        if content_rows == 1 && !phantom_line && self.completion_state.is_none() {
+            if let Some(ref cb) = state.hints_callback {
+                if let Some((hint, color, bold)) = cb(&self.buffer.as_string()) {
+                    let last_line_len = content_len % cols;
+                    let space = if last_line_len == 0 {
+                        0
+                    } else {
+                        cols - last_line_len
+                    };
+
+                    if space > 0 {
+                        let hint_str: String = hint.chars().take(space).collect();
+                        if !hint_str.is_empty() {
                             if bold {
                                 output.push_str("\x1b[1m");
                             }
                             if color >= 0 {
                                 output.push_str(&format!("\x1b[{color}m"));
                             }
-                            output.extend(hint_chars);
+                            output.push_str(&hint_str);
                             output.push_str("\x1b[0m");
                         }
                     }
@@ -698,35 +727,28 @@ impl Editor {
             }
         }
 
-        // If we are at the very end of the screen with our prompt, we need to
-        // emit a newline and move the prompt to the first column
-        if self.buffer.pos > 0
-            && self.buffer.pos == self.buffer.chars.len()
-            && (plen + self.buffer.pos) % cols == 0
-        {
-            output.push_str("\n\r");
-            if rows + 1 > self.old_rows {
-                self.old_rows = rows + 1;
-            }
-        } else {
-            self.old_rows = rows;
+        // Add phantom line if needed
+        if phantom_line {
+            output.push_str("\r\n");
         }
 
-        // Move cursor to correct position
-        let cursor_row = (plen + self.buffer.pos).div_ceil(cols);
-        let cursor_col = (plen + self.buffer.pos) % cols;
+        // Now position cursor
+        // We're currently at end of content
+        let current_row = total_rows - 1;
 
-        // Move up to the cursor row if needed
-        if cursor_row < self.old_rows {
-            output.push_str(&format!("\x1b[{}A", self.old_rows - cursor_row));
+        // Move to cursor row
+        if cursor_row < current_row {
+            output.push_str(&format!("\x1b[{}A", current_row - cursor_row));
+        } else if cursor_row > current_row {
+            output.push_str(&format!("\x1b[{}B", cursor_row - current_row));
         }
 
         // Move to cursor column
-        if cursor_col > 0 {
-            output.push_str(&format!("\r\x1b[{cursor_col}C"));
-        } else {
-            output.push('\r');
-        }
+        output.push_str(&format!("\r\x1b[{}C", cursor_col));
+
+        // Update state
+        self.old_rows = total_rows;
+        self.cursor_row_offset = cursor_row;
 
         self.terminal.write(&output)
     }
