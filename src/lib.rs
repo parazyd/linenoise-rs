@@ -921,6 +921,9 @@ impl Editor {
                 }
                 c if c == Key::CtrlL as u8 => {
                     self.terminal.clear_screen()?;
+                    // Reset multiline state after clearing screen
+                    self.old_rows = 0;
+                    self.cursor_row_offset = 0;
                     self.refresh_line()?;
                 }
                 c if c == Key::CtrlT as u8 => {
@@ -1430,6 +1433,9 @@ impl LinenoiseState {
                     }
                     c if c == Key::CtrlL as u8 => {
                         self.editor.terminal.clear_screen()?;
+                        // Reset multiline state after clearing screen
+                        self.editor.old_rows = 0;
+                        self.editor.cursor_row_offset = 0;
                         self.editor.refresh_line()?;
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -1486,14 +1492,15 @@ impl LinenoiseState {
 
     /// Hide the current line, when using the multiplexed API.
     pub fn hide(&self) -> io::Result<()> {
-        // Save cursor position and clear line
-        self.editor.terminal.write("\x1b[s\r\x1b[0K")
+        // Move to beginning of line and clear it
+        self.editor.terminal.write("\r\x1b[0K")
     }
 
     /// Show the current line, when using the multiplexed API.
     pub fn show(&mut self) -> io::Result<()> {
-        // Restore cursor position and refresh
-        self.editor.terminal.write("\x1b[u")?;
+        // Instead of restoring cursor position which might be stale,
+        // just move to beginning of line and refresh
+        self.editor.terminal.write("\r")?;
         self.editor.refresh_line()
     }
 
