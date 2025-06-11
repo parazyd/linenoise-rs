@@ -1381,6 +1381,8 @@ impl LinenoiseState {
 
                 match c {
                     c if c == Key::Enter as u8 => {
+                        // Move to new line before returning
+                        let _ = self.editor.terminal.write("\r\n");
                         self.active = false;
                         Ok(Some(self.editor.buffer.as_string()))
                     }
@@ -1485,7 +1487,6 @@ impl LinenoiseState {
         if self.active {
             self.active = false;
             self.editor.terminal.disable_raw_mode()?;
-            println!();
         }
         Ok(())
     }
