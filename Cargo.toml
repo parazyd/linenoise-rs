@@ -1,6 +1,6 @@
 [package]
 name = "linenoise-rs"
-version = "0.0.2"
+version = "0.1.0"
 homepage = "https://github.com/parazyd/linenoise-rs/"
 description = "Guerilla like editing library"
 authors = ["parazyd <parazyd@dyne.org>"]
