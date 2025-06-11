@@ -1365,10 +1365,6 @@ pub fn linenoise_print_key_codes() {
             quit_buf[2] = quit_buf[3];
             quit_buf[3] = c;
 
-            if &quit_buf == b"quit" {
-                break;
-            }
-
             // Build the output string first to avoid any control char interpretation
             let mut output = format!(
                 "'{}'  {:#04x}",
@@ -1401,6 +1397,10 @@ pub fn linenoise_print_key_codes() {
 
             // Use write to avoid println's processing, add explicit \r\n
             let _ = terminal.write(&format!("{}\r\n", output));
+
+            if &quit_buf == b"quit" {
+                break;
+            }
         }
     }
 
