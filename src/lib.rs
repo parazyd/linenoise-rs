@@ -46,8 +46,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::io::RawFd;
 use std::sync::Mutex;
-use std::time::Duration;
-use std::{env, mem, ptr};
+use std::{env, mem};
 
 use libc::{c_void, tcgetattr, tcsetattr, termios};
 
@@ -84,7 +83,6 @@ pub type CompletionCallback = fn(&str, &mut Vec<String>);
 pub type HintsCallback = fn(&str) -> Option<(String, i32, bool)>;
 
 lazy_static::lazy_static! {
-    // Global state
     static ref G: Mutex<GlobalState> = Mutex::new(GlobalState::new());
 }
 
@@ -205,13 +203,22 @@ impl Terminal {
             return Err(io::Error::last_os_error());
         }
 
+        // Modify the original mode
         let mut raw = orig;
+        // input modes: no break, no CR to NL, no parity check, no strip char,
+        // no start/stop output control
         raw.c_iflag &= !(libc::BRKINT | libc::ICRNL | libc::INPCK | libc::ISTRIP | libc::IXON);
+        // output modes - disable post processing
         raw.c_oflag &= !libc::OPOST;
+        // control modes - set 8 bit chars
         raw.c_cflag |= libc::CS8;
+        // local modes - echoing off, canonical off, no extended functions,
+        // no signal chars (^Z,^C)
         raw.c_lflag &= !(libc::ECHO | libc::ICANON | libc::IEXTEN | libc::ISIG);
-        raw.c_cc[libc::VMIN] = 1;
-        raw.c_cc[libc::VTIME] = 0;
+        // control chars - set return condition: min number of bytes and timer.
+        // We want read to return every single byte, without timeout
+        raw.c_cc[libc::VMIN] = 1; // 1 byte
+        raw.c_cc[libc::VTIME] = 0; // no timer
 
         if unsafe { tcsetattr(self.ifd, libc::TCSAFLUSH, &raw) } < 0 {
             return Err(io::Error::last_os_error());
@@ -277,40 +284,42 @@ impl Terminal {
         }
     }
 
-    fn read_byte_timeout(&self, timeout: Duration) -> io::Result<Option<u8>> {
-        use libc::{fd_set, select, timeval, FD_SET, FD_ZERO};
+    fn read_byte_nonblocking(&self) -> io::Result<Option<u8>> {
+        use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK};
 
         unsafe {
-            let mut readfds: fd_set = mem::zeroed();
-            FD_ZERO(&mut readfds);
-            FD_SET(self.ifd, &mut readfds);
-
-            let mut tv = timeval {
-                tv_sec: timeout.as_secs() as i64,
-                tv_usec: timeout.subsec_micros() as i64,
-            };
-
-            let ret = select(
-                self.ifd + 1,
-                &mut readfds,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut tv,
-            );
-
-            if ret == -1 {
+            // Get current flags
+            let flags = fcntl(self.ifd, F_GETFL, 0);
+            if flags == -1 {
                 return Err(io::Error::last_os_error());
-            } else if ret == 0 {
-                return Ok(None); // Timeout
             }
 
-            self.read_byte()
+            // Set non-blocking
+            if fcntl(self.ifd, F_SETFL, flags | O_NONBLOCK) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+
+            // Try to read
+            let result = self.read_byte();
+
+            // Restore blocking mode - always attempt this
+            let restore_result = fcntl(self.ifd, F_SETFL, flags);
+
+            // Check restore result after we have our read result
+            if restore_result == -1 {
+                return Err(io::Error::last_os_error());
+            }
+
+            match result {
+                Ok(b) => Ok(b),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+                Err(e) => Err(e),
+            }
         }
     }
 
     /// Use the ESC [6n escape sequence to query the horizontal cursor position
-    /// and return it. On error -1 is returned, on success the position of the
-    /// cursor.
+    /// and return it.
     fn get_cursor_position(&self) -> io::Result<(usize, usize)> {
         let mut buf = [0u8; 32];
         let mut i = 0;
@@ -858,15 +867,11 @@ impl Editor {
     }
 
     fn handle_escape_sequence(&mut self) -> io::Result<()> {
-        match self
-            .terminal
-            .read_byte_timeout(Duration::from_millis(100))?
-        {
+        // After ESC, check if more bytes are immediately available
+        // Escape sequences are sent atomically, so they should be in the buffer
+        match self.terminal.read_byte_nonblocking()? {
             Some(b'[') => {
-                match self
-                    .terminal
-                    .read_byte_timeout(Duration::from_millis(100))?
-                {
+                match self.terminal.read_byte_nonblocking()? {
                     Some(b'A') => self.handle_history(1)?,  // Up
                     Some(b'B') => self.handle_history(-1)?, // Down
                     Some(b'C') => {
@@ -893,10 +898,7 @@ impl Editor {
                     }
                     Some(b'3') => {
                         // Delete key
-                        if let Some(b'~') = self
-                            .terminal
-                            .read_byte_timeout(Duration::from_millis(100))?
-                        {
+                        if let Some(b'~') = self.terminal.read_byte_nonblocking()? {
                             if self.buffer.delete() {
                                 self.refresh_line()?;
                             }
@@ -906,10 +908,7 @@ impl Editor {
                 }
             }
             Some(b'O') => {
-                match self
-                    .terminal
-                    .read_byte_timeout(Duration::from_millis(100))?
-                {
+                match self.terminal.read_byte_nonblocking()? {
                     Some(b'H') => {
                         // Home
                         self.buffer.move_home();
@@ -1370,38 +1369,42 @@ pub fn linenoise_print_key_codes() {
                 break;
             }
 
-            print!("'{}'", if c >= 32 && c < 127 { c as char } else { '?' });
-            print!(" {c:#04x}");
+            // Build the output string first to avoid any control char interpretation
+            let mut output = format!(
+                "'{}'  {:#04x}",
+                if c >= 32 && c < 127 { c as char } else { '?' },
+                c
+            );
 
-            // Print name if known
+            // Append name if known
             match c {
-                1 => print!(" (ctrl-a)"),
-                2 => print!(" (ctrl-b)"),
-                3 => print!(" (ctrl-c)"),
-                4 => print!(" (ctrl-d)"),
-                5 => print!(" (ctrl-e)"),
-                6 => print!(" (ctrl-f)"),
-                8 => print!(" (ctrl-h)"),
-                9 => print!(" (tab)"),
-                11 => print!(" (ctrl-k)"),
-                12 => print!(" (ctrl-l)"),
-                13 => print!(" (enter)"),
-                14 => print!(" (ctrl-n)"),
-                16 => print!(" (ctrl-p)"),
-                20 => print!(" (ctrl-t)"),
-                21 => print!(" (ctrl-u)"),
-                23 => print!(" (ctrl-w)"),
-                27 => print!(" (esc)"),
-                127 => print!(" (backspace)"),
+                1 => output.push_str(" (ctrl-a)"),
+                2 => output.push_str(" (ctrl-b)"),
+                3 => output.push_str(" (ctrl-c)"),
+                4 => output.push_str(" (ctrl-d)"),
+                5 => output.push_str(" (ctrl-e)"),
+                6 => output.push_str(" (ctrl-f)"),
+                8 => output.push_str(" (ctrl-h)"),
+                9 => output.push_str(" (tab)"),
+                11 => output.push_str(" (ctrl-k)"),
+                12 => output.push_str(" (ctrl-l)"),
+                13 => output.push_str(" (enter)"),
+                14 => output.push_str(" (ctrl-n)"),
+                16 => output.push_str(" (ctrl-p)"),
+                20 => output.push_str(" (ctrl-t)"),
+                21 => output.push_str(" (ctrl-u)"),
+                23 => output.push_str(" (ctrl-w)"),
+                27 => output.push_str(" (esc)"),
+                127 => output.push_str(" (backspace)"),
                 _ => {}
             }
 
-            println!();
-            let _ = io::stdout().flush();
+            // Use write to avoid println's processing, add explicit \r\n
+            let _ = terminal.write(&format!("{}\r\n", output));
         }
     }
 
-    // _guard will be dropped here
+    // _guard will be dropped here, terminal returns to cooked mode
     println!();
 }
 
