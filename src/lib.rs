@@ -857,167 +857,6 @@ impl Editor {
         self.refresh_line()
     }
 
-    fn edit(&mut self) -> io::Result<Option<String>> {
-        // Initial display
-        self.refresh_line()?;
-
-        loop {
-            let c = match self.terminal.read_byte()? {
-                Some(c) => c,
-                None => return Ok(None), // EOF
-            };
-
-            // Handle completion state
-            if self.completion_state.is_some() && c != Key::Tab as u8 {
-                // Any non-Tab key accepts the current completion
-                self.accept_completion();
-                // Continue processing the key with the completed text
-            }
-
-            match c {
-                c if c == Key::Enter as u8 => {
-                    return Ok(Some(self.buffer.as_string()));
-                }
-                c if c == Key::CtrlC as u8 => {
-                    return Err(io::Error::new(io::ErrorKind::Interrupted, ""));
-                }
-                c if c == Key::CtrlD as u8 => {
-                    if self.buffer.chars.is_empty() {
-                        return Ok(None);
-                    } else {
-                        self.buffer.delete();
-                        self.refresh_line()?;
-                    }
-                }
-                c if c == Key::Tab as u8 => {
-                    self.handle_completion()?;
-                }
-                c if c == Key::Backspace as u8 || c == Key::CtrlH as u8 => {
-                    if self.buffer.backspace() {
-                        self.refresh_line()?;
-                    }
-                }
-                c if c == Key::CtrlU as u8 => {
-                    self.buffer.clear();
-                    self.refresh_line()?;
-                }
-                c if c == Key::CtrlK as u8 => {
-                    self.buffer.delete_to_end();
-                    self.refresh_line()?;
-                }
-                c if c == Key::CtrlW as u8 => {
-                    self.buffer.delete_word();
-                    self.refresh_line()?;
-                }
-                c if c == Key::CtrlA as u8 => {
-                    self.buffer.move_home();
-                    self.refresh_line()?;
-                }
-                c if c == Key::CtrlE as u8 => {
-                    self.buffer.move_end();
-                    self.refresh_line()?;
-                }
-                c if c == Key::CtrlB as u8 => {
-                    if self.buffer.move_left() {
-                        self.refresh_line()?;
-                    }
-                }
-                c if c == Key::CtrlF as u8 => {
-                    if self.buffer.move_right() {
-                        self.refresh_line()?;
-                    }
-                }
-                c if c == Key::CtrlP as u8 => {
-                    self.handle_history(1)?;
-                }
-                c if c == Key::CtrlN as u8 => {
-                    self.handle_history(-1)?;
-                }
-                c if c == Key::CtrlL as u8 => {
-                    self.terminal.clear_screen()?;
-                    // Reset multiline state after clearing screen
-                    self.old_rows = 0;
-                    self.cursor_row_offset = 0;
-                    self.refresh_line()?;
-                }
-                c if c == Key::CtrlT as u8 => {
-                    // Transpose chars
-                    if self.buffer.pos > 0 && self.buffer.chars.len() > 1 {
-                        if self.buffer.pos == self.buffer.chars.len() {
-                            self.buffer
-                                .chars
-                                .swap(self.buffer.pos - 2, self.buffer.pos - 1);
-                        } else {
-                            self.buffer.chars.swap(self.buffer.pos - 1, self.buffer.pos);
-                            self.buffer.pos += 1;
-                        }
-                        self.refresh_line()?;
-                    }
-                }
-                c if c == Key::Esc as u8 => {
-                    // Handle escape sequences
-                    self.handle_escape_sequence()?;
-                }
-                c if c >= 32 && c < 127 => {
-                    // Printable ASCII
-                    if self.buffer.insert(c as char) {
-                        self.refresh_line()?;
-                    } else {
-                        self.terminal.beep();
-                    }
-                }
-                c if c >= 128 => {
-                    // UTF-8 handling
-                    let mut utf8_buf = vec![c];
-                    let mut char_complete = false;
-
-                    // Determine how many bytes we need
-                    let bytes_needed = if c & 0xE0 == 0xC0 {
-                        2
-                    } else if c & 0xF0 == 0xE0 {
-                        3
-                    } else if c & 0xF8 == 0xF0 {
-                        4
-                    } else {
-                        1 // Invalid UTF-8 start byte
-                    };
-
-                    // Read remaining bytes
-                    for _ in 1..bytes_needed {
-                        if let Ok(Some(next_byte)) = self.terminal.read_byte() {
-                            if next_byte & 0xC0 == 0x80 {
-                                utf8_buf.push(next_byte);
-                            } else {
-                                break; // Invalid continuation byte
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Try to decode
-                    if utf8_buf.len() == bytes_needed {
-                        if let Ok(s) = std::str::from_utf8(&utf8_buf) {
-                            if let Some(ch) = s.chars().next() {
-                                if self.buffer.insert(ch) {
-                                    self.refresh_line()?;
-                                    char_complete = true;
-                                }
-                            }
-                        }
-                    }
-
-                    if !char_complete {
-                        self.terminal.beep();
-                    }
-                }
-                _ => {
-                    // Ignore other characters
-                }
-            }
-        }
-    }
-
     fn handle_escape_sequence(&mut self) -> io::Result<()> {
         match self
             .terminal
@@ -1088,6 +927,219 @@ impl Editor {
         }
         Ok(())
     }
+
+    /// Process a single input character/byte
+    fn process_key(&mut self, c: u8) -> io::Result<Option<String>> {
+        // Handle completion state
+        if self.completion_state.is_some() && c != Key::Tab as u8 {
+            self.accept_completion();
+        }
+
+        match c {
+            c if c == Key::Enter as u8 => Ok(Some(self.buffer.as_string())),
+            c if c == Key::CtrlC as u8 => Err(io::Error::new(io::ErrorKind::Interrupted, "")),
+            c if c == Key::CtrlD as u8 => {
+                if self.buffer.chars.is_empty() {
+                    Ok(None)
+                } else {
+                    self.buffer.delete();
+                    self.refresh_line()?;
+                    Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "More input needed",
+                    ))
+                }
+            }
+            c if c == Key::Tab as u8 => {
+                self.handle_completion()?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::Backspace as u8 || c == Key::CtrlH as u8 => {
+                if self.buffer.backspace() {
+                    self.refresh_line()?;
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlU as u8 => {
+                self.buffer.clear();
+                self.refresh_line()?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlK as u8 => {
+                self.buffer.delete_to_end();
+                self.refresh_line()?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlW as u8 => {
+                self.buffer.delete_word();
+                self.refresh_line()?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlA as u8 => {
+                self.buffer.move_home();
+                self.refresh_line()?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlE as u8 => {
+                self.buffer.move_end();
+                self.refresh_line()?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlB as u8 => {
+                if self.buffer.move_left() {
+                    self.refresh_line()?;
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlF as u8 => {
+                if self.buffer.move_right() {
+                    self.refresh_line()?;
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlP as u8 => {
+                self.handle_history(1)?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlN as u8 => {
+                self.handle_history(-1)?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlL as u8 => {
+                self.terminal.clear_screen()?;
+                self.old_rows = 0;
+                self.cursor_row_offset = 0;
+                self.refresh_line()?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::CtrlT as u8 => {
+                // Transpose chars
+                if self.buffer.pos > 0 && self.buffer.chars.len() > 1 {
+                    if self.buffer.pos == self.buffer.chars.len() {
+                        self.buffer
+                            .chars
+                            .swap(self.buffer.pos - 2, self.buffer.pos - 1);
+                    } else {
+                        self.buffer.chars.swap(self.buffer.pos - 1, self.buffer.pos);
+                        self.buffer.pos += 1;
+                    }
+                    self.refresh_line()?;
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c == Key::Esc as u8 => {
+                self.handle_escape_sequence()?;
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c >= 32 && c < 127 => {
+                // Printable ASCII
+                if self.buffer.insert(c as char) {
+                    self.refresh_line()?;
+                } else {
+                    self.terminal.beep();
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            c if c >= 128 => {
+                // UTF-8 handling
+                let mut utf8_buf = vec![c];
+                let mut char_complete = false;
+
+                // Determine how many bytes we need
+                let bytes_needed = if c & 0xE0 == 0xC0 {
+                    2
+                } else if c & 0xF0 == 0xE0 {
+                    3
+                } else if c & 0xF8 == 0xF0 {
+                    4
+                } else {
+                    1 // Invalid UTF-8 start byte
+                };
+
+                // Read remaining bytes
+                for _ in 1..bytes_needed {
+                    if let Ok(Some(next_byte)) = self.terminal.read_byte() {
+                        if next_byte & 0xC0 == 0x80 {
+                            utf8_buf.push(next_byte);
+                        } else {
+                            break; // Invalid continuation byte
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                // Try to decode
+                if utf8_buf.len() == bytes_needed {
+                    if let Ok(s) = std::str::from_utf8(&utf8_buf) {
+                        if let Some(ch) = s.chars().next() {
+                            if self.buffer.insert(ch) {
+                                self.refresh_line()?;
+                                char_complete = true;
+                            }
+                        }
+                    }
+                }
+
+                if !char_complete {
+                    self.terminal.beep();
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "More input needed",
+                ))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "More input needed",
+            )),
+        }
+    }
 }
 
 /// Return true if the terminal name is in the list of terminals we know
@@ -1120,20 +1172,36 @@ pub fn linenoise(prompt: &str) -> Option<String> {
         return linenoise_unsupported_term(prompt);
     }
 
-    let _guard = match terminal.enable_raw_mode() {
-        Ok(guard) => guard,
+    // Use the multiplexed API internally
+    let mut state = match LinenoiseState::edit_start(-1, -1, prompt) {
+        Ok(s) => s,
         Err(_) => return None,
     };
 
-    let mut editor = Editor::new(terminal, prompt);
-    let result = editor.edit();
-
-    // _guard will be dropped here, restoring terminal
-    println!(); // New line after input
-
-    match result {
-        Ok(Some(line)) => Some(line),
-        _ => None,
+    // Read until we get a result
+    loop {
+        match state.edit_feed() {
+            Ok(Some(line)) => {
+                let _ = state.edit_stop();
+                return Some(line);
+            }
+            Ok(None) => {
+                let _ = state.edit_stop();
+                return None;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                let _ = state.edit_stop();
+                return None;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Need more input, continue
+                continue;
+            }
+            Err(_) => {
+                let _ = state.edit_stop();
+                return None;
+            }
+        }
     }
 }
 
@@ -1389,112 +1457,29 @@ impl LinenoiseState {
             return Ok(None);
         }
 
-        // Try to read a byte without blocking
+        // Try to read a byte
         match self.editor.terminal.read_byte()? {
             Some(c) => {
-                // Process the character similar to the main edit loop
-                if self.editor.completion_state.is_some() && c != Key::Tab as u8 {
-                    self.editor.accept_completion();
-                }
-
-                match c {
-                    c if c == Key::Enter as u8 => {
-                        // Move to new line before returning
-                        let _ = self.editor.terminal.write("\r\n");
-                        self.active = false;
-                        Ok(Some(self.editor.buffer.as_string()))
-                    }
-                    c if c == Key::CtrlC as u8 => {
-                        self.active = false;
-                        Err(io::Error::new(io::ErrorKind::Interrupted, ""))
-                    }
-                    c if c == Key::CtrlD as u8 => {
-                        if self.editor.buffer.chars.is_empty() {
+                match self.editor.process_key(c) {
+                    Ok(result) => {
+                        if result.is_some() {
+                            // Move to new line before returning
+                            let _ = self.editor.terminal.write("\r\n");
                             self.active = false;
-                            Ok(None)
-                        } else {
-                            self.editor.buffer.delete();
-                            self.editor.refresh_line()?;
-                            Err(io::Error::new(
-                                io::ErrorKind::WouldBlock,
-                                "More input needed",
-                            ))
                         }
+                        Ok(result)
                     }
-                    c if c == Key::Tab as u8 => {
-                        self.editor.handle_completion()?;
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "More input needed",
-                        ))
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                        self.active = false;
+                        Err(e)
                     }
-                    c if c == Key::Backspace as u8 || c == Key::CtrlH as u8 => {
-                        if self.editor.buffer.backspace() {
-                            self.editor.refresh_line()?;
-                        }
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "More input needed",
-                        ))
-                    }
-                    c if c == Key::CtrlP as u8 => {
-                        self.editor.handle_history(1)?;
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "More input needed",
-                        ))
-                    }
-                    c if c == Key::CtrlN as u8 => {
-                        self.editor.handle_history(-1)?;
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "More input needed",
-                        ))
-                    }
-                    c if c == Key::CtrlL as u8 => {
-                        self.editor.terminal.clear_screen()?;
-                        // Reset multiline state after clearing screen
-                        self.editor.old_rows = 0;
-                        self.editor.cursor_row_offset = 0;
-                        self.editor.refresh_line()?;
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "More input needed",
-                        ))
-                    }
-                    c if c == Key::Esc as u8 => {
-                        self.editor.handle_escape_sequence()?;
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "More input needed",
-                        ))
-                    }
-                    c if c >= 32 && c < 127 => {
-                        if self.editor.buffer.insert(c as char) {
-                            self.editor.refresh_line()?;
-                        } else {
-                            self.editor.terminal.beep();
-                        }
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "More input needed",
-                        ))
-                    }
-                    _ => {
-                        // Handle other control characters or ignore
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "More input needed",
-                        ))
-                    }
+                    Err(e) => Err(e),
                 }
             }
             None => {
-                // No input available
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
+                // EOF
+                self.active = false;
+                Ok(None)
             }
         }
     }
