@@ -569,15 +569,21 @@ impl Editor {
         let prompt_len = self.prompt.chars().count();
         let available_cols = self.terminal.cols.saturating_sub(prompt_len);
 
-        if content.chars().count() > available_cols {
+        let cursor_screen_pos = if content.chars().count() > available_cols {
             // Show a window around the cursor
             let window_start = self.buffer.pos.saturating_sub(available_cols / 2);
+            let window_end = min(window_start + available_cols, content.chars().count());
+            let actual_window_start = window_end.saturating_sub(available_cols);
+
             let window: String = content
                 .chars()
-                .skip(window_start)
+                .skip(actual_window_start)
                 .take(available_cols)
                 .collect();
             output.push_str(&window);
+
+            // Calculate cursor position within the window
+            prompt_len + self.buffer.pos.saturating_sub(actual_window_start)
         } else {
             output.push_str(&content);
 
@@ -601,14 +607,16 @@ impl Editor {
                     }
                 }
             }
-        }
+
+            // When not windowing, cursor position is trivial
+            prompt_len + self.buffer.pos
+        };
 
         // Clear to end of line
         output.push_str("\x1b[0K");
 
         // Position cursor
-        let cursor_pos = prompt_len + min(self.buffer.pos, available_cols);
-        output.push_str(&format!("\r\x1b[{cursor_pos}C"));
+        output.push_str(&format!("\r\x1b[{cursor_screen_pos}C"));
 
         self.terminal.write(&output)
     }
