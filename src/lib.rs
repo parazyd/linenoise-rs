@@ -152,11 +152,9 @@ impl History {
     }
 
     fn get(&self, index: usize) -> Option<&str> {
-        if index > 0 && index <= self.entries.len() {
-            Some(&self.entries[self.entries.len() - index])
-        } else {
-            None
-        }
+        self.entries
+            .get(self.entries.len().wrapping_sub(index))
+            .map(|s| s.as_str())
     }
 }
 
@@ -321,53 +319,33 @@ impl Terminal {
     /// Use the ESC [6n escape sequence to query the horizontal cursor position
     /// and return it.
     fn get_cursor_position(&self) -> io::Result<(usize, usize)> {
+        self.write_bytes(b"\x1b[6n")?;
+
         let mut buf = [0u8; 32];
         let mut i = 0;
 
-        // Report cursor location
-        self.write_bytes(b"\x1b[6n")?;
-
-        // Read the response: ESC [ rows ; cols R
         while i < buf.len() - 1 {
-            match self.read_byte()? {
-                Some(byte) => {
-                    buf[i] = byte;
-                    i += 1;
-                    if byte == b'R' {
-                        break;
-                    }
-                }
-                None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "EOF while reading cursor position",
-                    ))
-                }
+            buf[i] = self.read_byte()?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "EOF reading cursor")
+            })?;
+            i += 1;
+            if buf[i - 1] == b'R' {
+                break;
             }
         }
 
-        // Expecting ESC [ rows ; cols R
-        if i < 6 || buf[0] != b'\x1b' || buf[1] != b'[' {
-            return Err(io::Error::other("Invalid escape sequence"));
-        }
+        // Parse response
+        let response =
+            std::str::from_utf8(&buf[2..i - 1]).map_err(|_| io::Error::other("Invalid UTF-8"))?;
 
-        // Parse it. Skip the escape and [
-        let response = std::str::from_utf8(&buf[2..i - 1])
-            .map_err(|_| io::Error::other("Invalid UTF-8 in cursor position"))?;
+        let (rows, cols) = response
+            .split_once(';')
+            .ok_or_else(|| io::Error::other("Invalid format"))?;
 
-        let parts: Vec<&str> = response.split(';').collect();
-        if parts.len() != 2 {
-            return Err(io::Error::other("Invalid cursor position format"));
-        }
-
-        let rows = parts[0]
-            .parse::<usize>()
-            .map_err(|_| io::Error::other("Invalid row number"))?;
-        let cols = parts[1]
-            .parse::<usize>()
-            .map_err(|_| io::Error::other("Invalid column number"))?;
-
-        Ok((rows, cols))
+        Ok((
+            rows.parse().map_err(|_| io::Error::other("Invalid row"))?,
+            cols.parse().map_err(|_| io::Error::other("Invalid col"))?,
+        ))
     }
 
     /// Try to get the number of columns in the current terminal, or assume 80
@@ -390,24 +368,22 @@ impl Terminal {
         // Get the initial position so we can restore it later
         let orig_pos = match temp_terminal.get_cursor_position() {
             Ok(pos) => pos,
-            Err(_) => return 80, // Failed to get position, use default
+            Err(_) => return 80,
         };
 
-        // Go to right margin by sending the cursor to column 999
+        // Go to right margin and get position
         if temp_terminal.write_bytes(b"\x1b[999C").is_err() {
             return 80;
         }
 
-        // Figure out where we actually are
         let cols = match temp_terminal.get_cursor_position() {
-            Ok(pos) => pos.1, // The column position tells us the width
+            Ok(pos) => pos.1,
             Err(_) => 80,
         };
 
         // Restore position
         if orig_pos != (0, 0) {
-            let restore_seq = format!("\x1b[{};{}H", orig_pos.0, orig_pos.1);
-            let _ = temp_terminal.write_bytes(restore_seq.as_bytes());
+            let _ = temp_terminal.write(&format!("\x1b[{};{}H", orig_pos.0, orig_pos.1));
         }
 
         cols
@@ -541,6 +517,18 @@ struct CompletionState {
     current_index: usize,
 }
 
+// Helper macro for common key processing pattern
+macro_rules! key_action {
+    ($self:expr, $action:expr) => {{
+        $action;
+        $self.refresh_line()?;
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "More input needed",
+        ))
+    }};
+}
+
 impl Editor {
     fn new(terminal: Terminal, prompt: &str) -> Self {
         Editor {
@@ -609,8 +597,7 @@ impl Editor {
             // Add hints if available (but not during completion)
             if self.completion_state.is_none() {
                 if let Some(ref callback) = state.hints_callback {
-                    let line = self.buffer.as_string();
-                    if let Some((hint, color, bold)) = callback(&line) {
+                    if let Some((hint, color, bold)) = callback(&self.buffer.as_string()) {
                         let remaining = available_cols.saturating_sub(content.chars().count());
                         if remaining > 0 {
                             if bold {
@@ -684,7 +671,6 @@ impl Editor {
         };
 
         // Move cursor to start of edit area
-        // First go to beginning of current line
         output.push('\r');
 
         // Then move up by our tracked offset
@@ -776,9 +762,8 @@ impl Editor {
             state.completion_callback
         };
 
-        let callback = match callback {
-            Some(cb) => cb,
-            None => return Ok(false),
+        let Some(cb) = callback else {
+            return Ok(false);
         };
 
         // Determine which line to use for completion
@@ -792,7 +777,7 @@ impl Editor {
 
         // Get completions
         let mut completions = Vec::new();
-        callback(&line_for_completion, &mut completions);
+        cb(&line_for_completion, &mut completions);
 
         if completions.is_empty() {
             self.terminal.beep();
@@ -827,7 +812,6 @@ impl Editor {
     }
 
     fn accept_completion(&mut self) {
-        // Simply clear the completion state, keeping the current buffer content
         self.completion_state = None;
     }
 
@@ -867,63 +851,46 @@ impl Editor {
     }
 
     fn handle_escape_sequence(&mut self) -> io::Result<()> {
-        // After ESC, check if more bytes are immediately available
-        // Escape sequences are sent atomically, so they should be in the buffer
-        match self.terminal.read_byte_nonblocking()? {
-            Some(b'[') => {
-                match self.terminal.read_byte_nonblocking()? {
-                    Some(b'A') => self.handle_history(1)?,  // Up
-                    Some(b'B') => self.handle_history(-1)?, // Down
-                    Some(b'C') => {
-                        // Right
-                        if self.buffer.move_right() {
-                            self.refresh_line()?;
-                        }
-                    }
-                    Some(b'D') => {
-                        // Left
-                        if self.buffer.move_left() {
-                            self.refresh_line()?;
-                        }
-                    }
-                    Some(b'H') => {
-                        // Home
-                        self.buffer.move_home();
-                        self.refresh_line()?;
-                    }
-                    Some(b'F') => {
-                        // End
-                        self.buffer.move_end();
-                        self.refresh_line()?;
-                    }
-                    Some(b'3') => {
-                        // Delete key
-                        if let Some(b'~') = self.terminal.read_byte_nonblocking()? {
-                            if self.buffer.delete() {
-                                self.refresh_line()?;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Some(b'O') => {
-                match self.terminal.read_byte_nonblocking()? {
-                    Some(b'H') => {
-                        // Home
-                        self.buffer.move_home();
-                        self.refresh_line()?;
-                    }
-                    Some(b'F') => {
-                        // End
-                        self.buffer.move_end();
-                        self.refresh_line()?;
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
+        let seq = [
+            self.terminal.read_byte_nonblocking()?,
+            self.terminal.read_byte_nonblocking()?,
+        ];
+
+        let action: Option<fn(&mut Self) -> io::Result<()>> = match seq {
+            [Some(b'['), Some(b'A')] => Some(|s| s.handle_history(1)),
+            [Some(b'['), Some(b'B')] => Some(|s| s.handle_history(-1)),
+            [Some(b'['), Some(b'C')] => Some(|s| {
+                s.buffer.move_right();
+                Ok(())
+            }),
+            [Some(b'['), Some(b'D')] => Some(|s| {
+                s.buffer.move_left();
+                Ok(())
+            }),
+            [Some(b'['), Some(b'H')] | [Some(b'O'), Some(b'H')] => Some(|s| {
+                s.buffer.move_home();
+                Ok(())
+            }),
+            [Some(b'['), Some(b'F')] | [Some(b'O'), Some(b'F')] => Some(|s| {
+                s.buffer.move_end();
+                Ok(())
+            }),
+            _ => None,
+        };
+
+        if let Some(f) = action {
+            f(self)?;
+            self.refresh_line()?;
         }
+
+        // Special case for delete
+        if matches!(seq, [Some(b'['), Some(b'3')])
+            && matches!(self.terminal.read_byte_nonblocking()?, Some(b'~'))
+            && self.buffer.delete()
+        {
+            self.refresh_line()?;
+        }
+
         Ok(())
     }
 
@@ -941,8 +908,9 @@ impl Editor {
                 if self.buffer.chars.is_empty() {
                     Ok(None)
                 } else {
-                    self.buffer.delete();
-                    self.refresh_line()?;
+                    if self.buffer.delete() {
+                        self.refresh_line()?;
+                    }
                     Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         "More input needed",
@@ -956,73 +924,20 @@ impl Editor {
                     "More input needed",
                 ))
             }
-            c if c == Key::Backspace as u8 || c == Key::CtrlH as u8 => {
-                if self.buffer.backspace() {
-                    self.refresh_line()?;
-                }
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
-            }
-            c if c == Key::CtrlU as u8 => {
-                self.buffer.clear();
-                self.refresh_line()?;
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
-            }
-            c if c == Key::CtrlK as u8 => {
-                self.buffer.delete_to_end();
-                self.refresh_line()?;
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
-            }
-            c if c == Key::CtrlW as u8 => {
-                self.buffer.delete_word();
-                self.refresh_line()?;
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
-            }
-            c if c == Key::CtrlA as u8 => {
-                self.buffer.move_home();
-                self.refresh_line()?;
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
-            }
-            c if c == Key::CtrlE as u8 => {
-                self.buffer.move_end();
-                self.refresh_line()?;
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
-            }
-            c if c == Key::CtrlB as u8 => {
-                if self.buffer.move_left() {
-                    self.refresh_line()?;
-                }
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
-            }
-            c if c == Key::CtrlF as u8 => {
-                if self.buffer.move_right() {
-                    self.refresh_line()?;
-                }
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "More input needed",
-                ))
-            }
+            c if c == Key::Backspace as u8 || c == Key::CtrlH as u8 => key_action!(self, {
+                self.buffer.backspace();
+            }),
+            c if c == Key::CtrlU as u8 => key_action!(self, self.buffer.clear()),
+            c if c == Key::CtrlK as u8 => key_action!(self, self.buffer.delete_to_end()),
+            c if c == Key::CtrlW as u8 => key_action!(self, self.buffer.delete_word()),
+            c if c == Key::CtrlA as u8 => key_action!(self, self.buffer.move_home()),
+            c if c == Key::CtrlE as u8 => key_action!(self, self.buffer.move_end()),
+            c if c == Key::CtrlB as u8 => key_action!(self, {
+                self.buffer.move_left();
+            }),
+            c if c == Key::CtrlF as u8 => key_action!(self, {
+                self.buffer.move_right();
+            }),
             c if c == Key::CtrlP as u8 => {
                 self.handle_history(1)?;
                 Err(io::Error::new(
@@ -1087,7 +1002,6 @@ impl Editor {
             c if c >= 128 => {
                 // UTF-8 handling
                 let mut utf8_buf = vec![c];
-                let mut char_complete = false;
 
                 // Determine how many bytes we need
                 let bytes_needed = if c & 0xE0 == 0xC0 {
@@ -1119,13 +1033,12 @@ impl Editor {
                         if let Some(ch) = s.chars().next() {
                             if self.buffer.insert(ch) {
                                 self.refresh_line()?;
-                                char_complete = true;
+                            } else {
+                                self.terminal.beep();
                             }
                         }
                     }
-                }
-
-                if !char_complete {
+                } else {
                     self.terminal.beep();
                 }
                 Err(io::Error::new(
@@ -1163,7 +1076,6 @@ pub fn linenoise(prompt: &str) -> Option<String> {
     let terminal = Terminal::new(libc::STDIN_FILENO, libc::STDOUT_FILENO);
 
     if !terminal.is_tty() {
-        // Not a TTY, read a line normally
         return linenoise_no_tty();
     }
 
@@ -1226,26 +1138,9 @@ fn linenoise_no_tty() -> Option<String> {
 /// For unsupported terminals provide basic functionality
 fn linenoise_unsupported_term(prompt: &str) -> Option<String> {
     print!("{prompt}");
-    if io::stdout().flush().is_err() {
-        return None;
-    }
+    let _ = io::stdout().flush();
 
-    // Read line using standard input like fgets
-    let mut line = String::new();
-    match io::stdin().read_line(&mut line) {
-        Ok(0) => None, // EOF
-        Ok(_) => {
-            // Remove trailing newline
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-            }
-            Some(line)
-        }
-        Err(_) => None,
-    }
+    linenoise_no_tty()
 }
 
 /// Toggle multi line mode.
