@@ -1,0 +1,13 @@
+[package]
+name = "linenoisers"
+version = "0.0.1"
+license = "BSD-2-Clause"
+edition = "2024"
+
+[dependencies]
+lazy_static = "1.5"
+libc = "0.2"
+
+[[example]]
+name = "linenoise"
+path = "linenoise-example.rs"
