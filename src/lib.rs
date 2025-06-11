@@ -140,13 +140,7 @@ impl History {
         }
 
         // Don't add duplicates
-        if self
-            .entries
-            .clone()
-            .into_iter()
-            .last()
-            .is_some_and(|last| last == line)
-        {
+        if self.entries.back().is_some_and(|last| last == line) {
             return false;
         }
 
@@ -156,7 +150,6 @@ impl History {
         }
 
         self.entries.push_back(line.to_string());
-
         true
     }
 
@@ -316,10 +309,10 @@ impl Terminal {
             match self.read_byte()? {
                 Some(byte) => {
                     buf[i] = byte;
+                    i += 1;
                     if byte == b'R' {
                         break;
                     }
-                    i += 1;
                 }
                 None => {
                     return Err(io::Error::new(
@@ -331,12 +324,12 @@ impl Terminal {
         }
 
         // Expecting ESC [ rows ; cols R
-        if i < 2 || buf[0] != b'\x1b' || buf[1] != b'[' {
+        if i < 6 || buf[0] != b'\x1b' || buf[1] != b'[' {
             return Err(io::Error::other("Invalid escape sequence"));
         }
 
         // Parse it. Skip the escape and [
-        let response = std::str::from_utf8(&buf[2..i])
+        let response = std::str::from_utf8(&buf[2..i - 1])
             .map_err(|_| io::Error::other("Invalid UTF-8 in cursor position"))?;
 
         let parts: Vec<&str> = response.split(';').collect();
@@ -852,7 +845,6 @@ impl Editor {
 
     fn edit(&mut self) -> io::Result<Option<String>> {
         // Initial display
-        self.terminal.write(&self.prompt)?;
         self.refresh_line()?;
 
         loop {
@@ -933,9 +925,13 @@ impl Editor {
                 }
                 c if c == Key::CtrlT as u8 => {
                     // Transpose chars
-                    if self.buffer.pos > 0 && self.buffer.pos < self.buffer.chars.len() {
-                        self.buffer.chars.swap(self.buffer.pos - 1, self.buffer.pos);
-                        if self.buffer.pos < self.buffer.chars.len() - 1 {
+                    if self.buffer.pos > 0 && self.buffer.chars.len() > 1 {
+                        if self.buffer.pos == self.buffer.chars.len() {
+                            self.buffer
+                                .chars
+                                .swap(self.buffer.pos - 2, self.buffer.pos - 1);
+                        } else {
+                            self.buffer.chars.swap(self.buffer.pos - 1, self.buffer.pos);
                             self.buffer.pos += 1;
                         }
                         self.refresh_line()?;
@@ -950,6 +946,51 @@ impl Editor {
                     if self.buffer.insert(c as char) {
                         self.refresh_line()?;
                     } else {
+                        self.terminal.beep();
+                    }
+                }
+                c if c >= 128 => {
+                    // UTF-8 handling
+                    let mut utf8_buf = vec![c];
+                    let mut char_complete = false;
+
+                    // Determine how many bytes we need
+                    let bytes_needed = if c & 0xE0 == 0xC0 {
+                        2
+                    } else if c & 0xF0 == 0xE0 {
+                        3
+                    } else if c & 0xF8 == 0xF0 {
+                        4
+                    } else {
+                        1 // Invalid UTF-8 start byte
+                    };
+
+                    // Read remaining bytes
+                    for _ in 1..bytes_needed {
+                        if let Ok(Some(next_byte)) = self.terminal.read_byte() {
+                            if next_byte & 0xC0 == 0x80 {
+                                utf8_buf.push(next_byte);
+                            } else {
+                                break; // Invalid continuation byte
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Try to decode
+                    if utf8_buf.len() == bytes_needed {
+                        if let Ok(s) = std::str::from_utf8(&utf8_buf) {
+                            if let Some(ch) = s.chars().next() {
+                                if self.buffer.insert(ch) {
+                                    self.refresh_line()?;
+                                    char_complete = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if !char_complete {
                         self.terminal.beep();
                     }
                 }
@@ -1042,6 +1083,7 @@ fn is_unsupported_term() -> bool {
         false
     }
 }
+
 // Public API
 
 /// The high level function that is the main API of the linenoise library.
@@ -1310,7 +1352,6 @@ impl LinenoiseState {
         let mut editor = Editor::new(terminal, prompt);
 
         // Display initial prompt
-        editor.terminal.write(&editor.prompt)?;
         editor.refresh_line()?;
 
         Ok(Self {
@@ -1357,7 +1398,6 @@ impl LinenoiseState {
                             ))
                         }
                     }
-                    // ... handle other keys similar to edit() method
                     c if c == Key::Tab as u8 => {
                         self.editor.handle_completion()?;
                         Err(io::Error::new(
@@ -1374,9 +1414,40 @@ impl LinenoiseState {
                             "More input needed",
                         ))
                     }
+                    c if c == Key::CtrlP as u8 => {
+                        self.editor.handle_history(1)?;
+                        Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "More input needed",
+                        ))
+                    }
+                    c if c == Key::CtrlN as u8 => {
+                        self.editor.handle_history(-1)?;
+                        Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "More input needed",
+                        ))
+                    }
+                    c if c == Key::CtrlL as u8 => {
+                        self.editor.terminal.clear_screen()?;
+                        self.editor.refresh_line()?;
+                        Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "More input needed",
+                        ))
+                    }
+                    c if c == Key::Esc as u8 => {
+                        self.editor.handle_escape_sequence()?;
+                        Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "More input needed",
+                        ))
+                    }
                     c if c >= 32 && c < 127 => {
                         if self.editor.buffer.insert(c as char) {
                             self.editor.refresh_line()?;
+                        } else {
+                            self.editor.terminal.beep();
                         }
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -1384,7 +1455,7 @@ impl LinenoiseState {
                         ))
                     }
                     _ => {
-                        // Handle other control characters
+                        // Handle other control characters or ignore
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
                             "More input needed",
