@@ -1442,6 +1442,10 @@ impl LinenoiseState {
 
         let mut editor = Editor::new(terminal, prompt);
 
+        // Reset editor state for new session
+        editor.history_index = 0;
+        editor.saved_line = None;
+
         // Display initial prompt
         editor.refresh_line()?;
 
