@@ -169,6 +169,25 @@ struct Terminal {
     cols: usize,
 }
 
+/// RAII guard that restores terminal to original mode when dropped
+struct RawModeGuard {
+    ifd: RawFd,
+    orig_termios: termios,
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            tcsetattr(self.ifd, libc::TCSAFLUSH, &self.orig_termios);
+        }
+        // Also update global state
+        if let Ok(mut state) = G.lock() {
+            state.raw_mode = false;
+            state.orig_termios = None;
+        }
+    }
+}
+
 impl Terminal {
     fn new(ifd: RawFd, ofd: RawFd) -> Self {
         let cols = Self::get_columns(ifd, ofd);
@@ -176,7 +195,7 @@ impl Terminal {
     }
 
     /// Raw mode: 1960 magic shit.
-    fn enable_raw_mode(&self) -> io::Result<()> {
+    fn enable_raw_mode(&self) -> io::Result<RawModeGuard> {
         if !self.is_tty() {
             return Err(io::Error::other("Not a TTY"));
         }
@@ -201,17 +220,12 @@ impl Terminal {
         let mut state = G.lock().unwrap();
         state.orig_termios = Some(orig);
         state.raw_mode = true;
+        drop(state);
 
-        Ok(())
-    }
-
-    fn disable_raw_mode(&self) -> io::Result<()> {
-        let mut state = G.lock().unwrap();
-        if let Some(orig) = state.orig_termios {
-            unsafe { tcsetattr(self.ifd, libc::TCSAFLUSH, &orig) };
-            state.raw_mode = false;
-        }
-        Ok(())
+        Ok(RawModeGuard {
+            ifd: self.ifd,
+            orig_termios: orig,
+        })
     }
 
     fn is_tty(&self) -> bool {
@@ -1106,14 +1120,15 @@ pub fn linenoise(prompt: &str) -> Option<String> {
         return linenoise_unsupported_term(prompt);
     }
 
-    if terminal.enable_raw_mode().is_err() {
-        return None;
-    }
+    let _guard = match terminal.enable_raw_mode() {
+        Ok(guard) => guard,
+        Err(_) => return None,
+    };
 
     let mut editor = Editor::new(terminal, prompt);
     let result = editor.edit();
 
-    let _ = editor.terminal.disable_raw_mode();
+    // _guard will be dropped here, restoring terminal
     println!(); // New line after input
 
     match result {
@@ -1268,9 +1283,10 @@ pub fn linenoise_print_key_codes() {
     println!("Linenoise key codes debugging mode.");
     println!("Press keys to see scan codes. Type 'quit' to exit.");
 
-    if terminal.enable_raw_mode().is_err() {
-        return;
-    }
+    let _guard = match terminal.enable_raw_mode() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
 
     let mut quit_buf = [0u8; 4];
 
@@ -1317,7 +1333,7 @@ pub fn linenoise_print_key_codes() {
         }
     }
 
-    let _ = terminal.disable_raw_mode();
+    // _guard will be dropped here
     println!();
 }
 
@@ -1325,6 +1341,7 @@ pub fn linenoise_print_key_codes() {
 pub struct LinenoiseState {
     editor: Editor,
     active: bool,
+    _raw_guard: Option<RawModeGuard>,
 }
 
 impl LinenoiseState {
@@ -1350,7 +1367,7 @@ impl LinenoiseState {
             return Err(io::Error::other("Not supported"));
         }
 
-        terminal.enable_raw_mode()?;
+        let raw_guard = terminal.enable_raw_mode()?;
 
         let mut editor = Editor::new(terminal, prompt);
 
@@ -1360,6 +1377,7 @@ impl LinenoiseState {
         Ok(Self {
             editor,
             active: true,
+            _raw_guard: Some(raw_guard),
         })
     }
 
@@ -1486,7 +1504,8 @@ impl LinenoiseState {
     pub fn edit_stop(&mut self) -> io::Result<()> {
         if self.active {
             self.active = false;
-            self.editor.terminal.disable_raw_mode()?;
+            // Drop the guard to restore terminal
+            self._raw_guard = None;
         }
         Ok(())
     }
