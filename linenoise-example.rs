@@ -105,10 +105,10 @@ fn main() {
 
                     match parts[0] {
                         "/historylen" => {
-                            if parts.len() > 1
-                                && let Ok(len) = parts[1].parse::<usize>()
-                            {
-                                linenoise_history_set_max_len(len);
+                            if parts.len() > 1 {
+                                if let Ok(len) = parts[1].parse::<usize>() {
+                                    linenoise_history_set_max_len(len);
+                                }
                             }
                         }
                         "/mask" => {

@@ -582,22 +582,22 @@ impl Editor {
             output.push_str(&content);
 
             // Add hints if available (but not during completion)
-            if self.completion_state.is_none()
-                && let Some(ref callback) = state.hints_callback
-            {
-                let line = self.buffer.as_string();
-                if let Some((hint, color, bold)) = callback(&line) {
-                    let remaining = available_cols.saturating_sub(content.chars().count());
-                    if remaining > 0 {
-                        if bold {
-                            output.push_str("\x1b[1m");
+            if self.completion_state.is_none() {
+                if let Some(ref callback) = state.hints_callback {
+                    let line = self.buffer.as_string();
+                    if let Some((hint, color, bold)) = callback(&line) {
+                        let remaining = available_cols.saturating_sub(content.chars().count());
+                        if remaining > 0 {
+                            if bold {
+                                output.push_str("\x1b[1m");
+                            }
+                            if color >= 0 {
+                                output.push_str(&format!("\x1b[{color}m"));
+                            }
+                            let hint_truncated: String = hint.chars().take(remaining).collect();
+                            output.push_str(&hint_truncated);
+                            output.push_str("\x1b[0m");
                         }
-                        if color >= 0 {
-                            output.push_str(&format!("\x1b[{color}m"));
-                        }
-                        let hint_truncated: String = hint.chars().take(remaining).collect();
-                        output.push_str(&hint_truncated);
-                        output.push_str("\x1b[0m");
                     }
                 }
             }
@@ -666,26 +666,25 @@ impl Editor {
         }
 
         // Handle hints on the first line if there's space
-        if rows == 1
-            && self.completion_state.is_none()
-            && let Some(ref callback) = state.hints_callback
-        {
-            let line = self.buffer.as_string();
-            if let Some((hint, color, bold)) = callback(&line) {
-                let current_line_len = (plen + self.buffer.chars.len()) % cols;
-                let remaining = cols.saturating_sub(current_line_len);
+        if rows == 1 && self.completion_state.is_none() {
+            if let Some(ref callback) = state.hints_callback {
+                let line = self.buffer.as_string();
+                if let Some((hint, color, bold)) = callback(&line) {
+                    let current_line_len = (plen + self.buffer.chars.len()) % cols;
+                    let remaining = cols.saturating_sub(current_line_len);
 
-                if remaining > 0 && current_line_len > 0 {
-                    let hint_chars: Vec<char> = hint.chars().take(remaining).collect();
-                    if !hint_chars.is_empty() {
-                        if bold {
-                            output.push_str("\x1b[1m");
+                    if remaining > 0 && current_line_len > 0 {
+                        let hint_chars: Vec<char> = hint.chars().take(remaining).collect();
+                        if !hint_chars.is_empty() {
+                            if bold {
+                                output.push_str("\x1b[1m");
+                            }
+                            if color >= 0 {
+                                output.push_str(&format!("\x1b[{color}m"));
+                            }
+                            output.extend(hint_chars);
+                            output.push_str("\x1b[0m");
                         }
-                        if color >= 0 {
-                            output.push_str(&format!("\x1b[{color}m"));
-                        }
-                        output.extend(hint_chars);
-                        output.push_str("\x1b[0m");
                     }
                 }
             }
@@ -970,9 +969,10 @@ impl Editor {
                         if let Some(b'~') = self
                             .terminal
                             .read_byte_timeout(Duration::from_millis(100))?
-                            && self.buffer.delete()
                         {
-                            self.refresh_line()?;
+                            if self.buffer.delete() {
+                                self.refresh_line()?;
+                            }
                         }
                     }
                     _ => {}
