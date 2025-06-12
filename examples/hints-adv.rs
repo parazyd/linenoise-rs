@@ -1,8 +1,6 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::Arc;
 
 use linenoise_rs::*;
-
-static COMMANDS: OnceLock<Mutex<CmdNode>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 struct CmdNode {
@@ -157,6 +155,20 @@ macro_rules! cmds {
     }};
 }
 
+thread_local! {
+    static COMMANDS: std::cell::RefCell<Option<Arc<CmdNode>>> = std::cell::RefCell::new(None);
+}
+
+fn set_commands(commands: CmdNode) {
+    COMMANDS.with(|c| {
+        *c.borrow_mut() = Some(Arc::new(commands));
+    });
+}
+
+fn hints_tls(buf: &str) -> Option<(String, i32, bool)> {
+    COMMANDS.with(|c| c.borrow().as_ref().and_then(|commands| commands.hints(buf)))
+}
+
 fn main() {
     let commands = cmds! {
         "git" => {
@@ -186,14 +198,8 @@ fn main() {
     assert!(commands.hints("git ch").is_some()); // Should complete "eckout"
     assert!(commands.hints("git checkout").is_some()); // Should suggest "-b" or "<branch>"
 
-    // I can't think of a better abstraction
-    COMMANDS.set(Mutex::new(commands)).unwrap();
-
-    fn hints(buf: &str) -> Option<(String, i32, bool)> {
-        COMMANDS.get().unwrap().lock().unwrap().hints(buf)
-    }
-
-    linenoise_set_hints_callback(hints);
+    set_commands(commands.clone());
+    linenoise_set_hints_callback(hints_tls);
 
     while let Some(input) = linenoise("> ") {
         match input.as_str() {
