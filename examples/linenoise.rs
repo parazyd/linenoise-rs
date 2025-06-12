@@ -1,23 +1,23 @@
-/* Original C example commands for reference:
- *
- * hello> /historylen 100
- * hello> /mask
- * hello> (type password - will show as ***)
- * hello> /unmask
- *
- * Special key bindings:
- * - Ctrl-A: Move to beginning of line
- * - Ctrl-E: Move to end of line
- * - Ctrl-K: Kill text from cursor to end of line
- * - Ctrl-U: Kill text from beginning to cursor
- * - Ctrl-L: Clear screen
- * - Ctrl-W: Delete previous word
- * - Ctrl-T: Transpose characters
- * - Tab: Completion
- * - Ctrl-C: Exit
- * - Ctrl-D: Exit (on empty line) or delete char
- *
- */
+//! Original C example commands for reference:
+//!
+//! ```text
+//! hello> /historylen 100
+//! hello> /mask
+//! hello> (type password - will show as ***)
+//! hello> /unmask
+//! ```
+//!
+//! Special key bindings:
+//! - Ctrl-A: Move to beginning of line
+//! - Ctrl-E: Move to end of line
+//! - Ctrl-K: Kill text from cursor to end of line
+//! - Ctrl-U: Kill text from beginning to cursor
+//! - Ctrl-L: Clear screen
+//! - Ctrl-W: Delete previous word
+//! - Ctrl-T: Transpose characters
+//! - Tab: Completion
+//! - Ctrl-C: Exit
+//! - Ctrl-D: Exit (on empty line) or delete char
 
 use std::{env, process};
 

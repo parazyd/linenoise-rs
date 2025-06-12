@@ -2,7 +2,7 @@ linenoise-rs
 ============
 
 Docs at <https://docs.rs/linenoise-rs/latest/linenoise_rs/>.
-See [linenoise-example.rs](linenoise-example.rs) for usage.
+See [examples/linenoise.rs](examples/linenoise.rs) for usage.
 
 Rust port of [linenoise](https://github.com/antirez/linenoise).
 Should also have proper UTF-8 support.
