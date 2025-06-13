@@ -11,3 +11,7 @@ edition = "2024"
 [dependencies]
 lazy_static = "1.5"
 libc = "0.2"
+
+[dev-dependencies]
+futures = "0.3"
+smol = "2.0"
